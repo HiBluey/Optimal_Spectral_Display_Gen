@@ -7,11 +7,12 @@ try:
     import pandas as pd
     import matplotlib.pyplot as plt
     import colour
+    import openpyxl  # 新增：用于支持 pandas 读取 .xlsx 文件
 except ImportError as e:
     print("="*50)
     print(f"【环境报错】缺少必要的第三方库: {e}")
     print("请打开命令行，运行以下命令安装所需依赖：")
-    print("pip install numpy pandas matplotlib colour-science")
+    print("pip install numpy pandas matplotlib colour-science openpyxl")
     print("="*50)
     input("按回车键退出程序...")
     sys.exit(1)
@@ -25,30 +26,34 @@ COLOR_SPACES = {
     "5": {"name": "Rec2020",      "R": [0.708, 0.292], "G": [0.170, 0.797], "B": [0.131, 0.046], "W": [0.3127, 0.3290]}
 }
 
-def load_custom_cmf(filepath, name):
-    """从本地 CSV 文件加载 CMF 并封装为 colour 对象"""
+def load_custom_cmfs_from_excel(filepath):
+    """从本地 Excel 文件读取所有 Sheet 的 CMF 数据并封装为 colour 对象"""
+    cmfs = {}
     if not os.path.exists(filepath):
-        print(f"⚠️ [提示] 当前目录下未找到自定义 CMF 文件 '{filepath}'，将跳过 {name} 的计算。")
-        return None
+        print(f"⚠️ [提示] 当前目录下未找到自定义 CMF 文件 '{filepath}'，将跳过外部 CMF 的计算。")
+        return cmfs
     try:
-        df = pd.read_csv(filepath)
-        # 智能提取前4列数值（假设第1列为波长，第2,3,4列为 x, y, z）
-        num_df = df.select_dtypes(include=[np.number])
-        if num_df.shape[1] < 4:
-            print(f"❌ [错误] '{filepath}' 格式异常，需要至少包含4列数值（波长, x_bar, y_bar, z_bar）。")
-            return None
+        # sheet_name=None 表示读取所有 sheet，返回字典：{sheet名: DataFrame}
+        excel_data = pd.read_excel(filepath, sheet_name=None)
+        for sheet_name, df in excel_data.items():
+            # 智能提取前4列数值（假设第1列为波长，第2,3,4列为 x, y, z）
+            num_df = df.select_dtypes(include=[np.number])
+            if num_df.shape[1] < 4:
+                print(f"❌ [错误] Sheet '{sheet_name}' 格式异常，需要至少包含4列数值（波长, x_bar, y_bar, z_bar）。已跳过。")
+                continue
+                
+            wavelengths = num_df.iloc[:, 0].values
+            cmf_values = num_df.iloc[:, 1:4].values
             
-        wavelengths = num_df.iloc[:, 0].values
-        cmf_values = num_df.iloc[:, 1:4].values
-        
-        # 将数据组装为字典供 colour 库识别
-        data_dict = {w: v for w, v in zip(wavelengths, cmf_values)}
-        custom_cmf = colour.MultiSpectralDistributions(data_dict, name=name)
-        print(f"✅ [成功] 已加载外部 CMF: {name}")
-        return custom_cmf
+            # 将数据组装为字典供 colour 库识别
+            data_dict = {w: v for w, v in zip(wavelengths, cmf_values)}
+            custom_cmf = colour.MultiSpectralDistributions(data_dict, name=sheet_name)
+            cmfs[sheet_name] = custom_cmf
+            print(f"✅ [成功] 已加载外部 CMF: {sheet_name}")
+        return cmfs
     except Exception as e:
-        print(f"❌ [错误] 读取外部 CMF '{filepath}' 时发生异常: {e}")
-        return None
+        print(f"❌ [错误] 读取外部 CMF Excel 文件 '{filepath}' 时发生异常: {e}")
+        return cmfs
 
 def get_cmf_data(cmf_obj, wavelengths):
     """将CMF对象对齐/插值到指定的波长范围并返回数组"""
@@ -132,7 +137,7 @@ def calculate_white_spectrum(R_spec, G_spec, B_spec, target_W_xy, cmf_values):
     return W_spec / np.max(W_spec)
 
 def main():
-    print("=== 最优光谱(Optimal Spectra)生成工具 v1.6 ===")
+    print("=== 最优光谱(Optimal Spectra)生成工具 v1.7 ===")
     print("请选择目标标准色彩空间：")
     for key, val in COLOR_SPACES.items():
         print(f"[{key}] {val['name']}")
@@ -146,9 +151,8 @@ def main():
     space_name = space_info["name"]
     print(f"\n✅ 您选择了：{space_name}")
 
-    # 刻度设置
-    fine_wavelengths = np.arange(390, 760.1, 0.1)
-    base_wavelengths = np.arange(390, 761, 1)
+    # 【修改点 1】刻度设置：统一采用 0.1nm 精度贯穿全局计算、导出和绘图
+    target_wavelengths = np.arange(390, 760.1, 0.1)
     
     # 动态构建 CMFS_DICT
     CMFS_DICT = {}
@@ -163,32 +167,25 @@ def main():
     if 'Judd 1951 2 Degree Standard Observer' in colour.MSDS_CMFS:
         CMFS_DICT["JUDD 2°"] = colour.MSDS_CMFS['Judd 1951 2 Degree Standard Observer']
         
-    # 2. 从本地读取用户提供的新观察者数据
-    cmf_170_2deg = load_custom_cmf("CMF.xlsx - CIE170-2 2°.csv", "CIE170-2 2°")
-    if cmf_170_2deg is not None:
-        CMFS_DICT["CIE170-2 2°"] = cmf_170_2deg
-        
-    cmf_170_10deg = load_custom_cmf("CMF.xlsx - CIE170-2 10°.csv", "CIE170-2 10°")
-    if cmf_170_10deg is not None:
-        CMFS_DICT["CIE170-2 10°"] = cmf_170_10deg
-
-    cmf_judd_vos = load_custom_cmf("CMF.xlsx - Judd&Vos1978 2°.csv", "Judd&Vos1978 2°")
-    if cmf_judd_vos is not None:
-        CMFS_DICT["Judd&Vos1978 2°"] = cmf_judd_vos
+    # 2. 从本地读取用户提供的新观察者数据（直接遍历 CMF.xlsx 的所有 Sheet）
+    custom_cmfs = load_custom_cmfs_from_excel("CMF.xlsx")
+    CMFS_DICT.update(custom_cmfs)
 
     print("\n正在解析，请稍候...\n")
-    # 高精度用 1931 用于寻找解，低精度 1931 用于混合 White
-    cmf_1931_fine = get_cmf_data(CMFS_DICT["CIE1931 2°"], fine_wavelengths)
-    cmf_1931_base = get_cmf_data(CMFS_DICT["CIE1931 2°"], base_wavelengths)
+    
+    # 全局使用 0.1nm 精度的 CMF 数据
+    cmf_1931_high_res = get_cmf_data(CMFS_DICT["CIE1931 2°"], target_wavelengths)
 
     # 求解最优光谱并强制离散投射
     spectra = {}
     for ch in ["R", "G", "B"]:
-        l1, l2, b_type = find_true_bounds_high_res(space_info[ch], cmf_1931_fine, fine_wavelengths)
+        l1, l2, b_type = find_true_bounds_high_res(space_info[ch], cmf_1931_high_res, target_wavelengths)
         
-        spec = np.zeros(len(base_wavelengths))
-        l1_idx = int(np.round(l1) - 390)
-        l2_idx = int(np.round(l2) - 390)
+        spec = np.zeros(len(target_wavelengths))
+        
+        # 【修改点 2】索引转换逻辑：适应 0.1 步长，乘 10
+        l1_idx = int(np.round((l1 - 390) * 10))
+        l2_idx = int(np.round((l2 - 390) * 10))
         
         if b_type == 1:
             spec[l1_idx : l2_idx + 1] = 1.0
@@ -199,10 +196,10 @@ def main():
         spectra[ch] = spec
         
     # 合成 White metamer
-    spectra["W"] = calculate_white_spectrum(spectra["R"], spectra["G"], spectra["B"], space_info["W"], cmf_1931_base)
+    spectra["W"] = calculate_white_spectrum(spectra["R"], spectra["G"], spectra["B"], space_info["W"], cmf_1931_high_res)
 
     # 导出 CSV
-    df_export = pd.DataFrame({"Wavelength": base_wavelengths})
+    df_export = pd.DataFrame({"Wavelength": target_wavelengths})
     for ch in ["W", "R", "G", "B"]:
         df_export[ch] = spectra[ch]
     
@@ -213,7 +210,7 @@ def main():
     # 计算不同观察者下的xy坐标
     results_text = []
     for cmf_name, cmf_obj in CMFS_DICT.items():
-        cmf_vals = get_cmf_data(cmf_obj, base_wavelengths)
+        cmf_vals = get_cmf_data(cmf_obj, target_wavelengths)
         results_text.append(f"\n--- {cmf_name} ---")
         for ch in ["W", "R", "G", "B"]:
             x, y = calculate_xy(spectra[ch], cmf_vals)
@@ -242,8 +239,8 @@ def main():
     
     for ch in ["W", "R", "G", "B"]:
         ax = axes[ch]
-        ax.fill_between(base_wavelengths, 0, spectra[ch], color=colors[ch], alpha=0.1, step='mid')
-        ax.plot(base_wavelengths, spectra[ch], color=colors[ch], label=ch, drawstyle='steps-mid', linewidth=2)
+        ax.fill_between(target_wavelengths, 0, spectra[ch], color=colors[ch], alpha=0.1, step='mid')
+        ax.plot(target_wavelengths, spectra[ch], color=colors[ch], label=ch, drawstyle='steps-mid', linewidth=2)
         ax.set_ylim(-0.05, 1.1)
         ax.set_ylabel("Relative")
         ax.set_title(titles[ch], loc='right', fontsize=10, pad=-15, color=colors[ch], fontweight='bold')
@@ -259,7 +256,8 @@ def main():
 
     ax_text = fig.add_subplot(gs[:, 1])
     ax_text.axis('off')
-    ax_text.text(0.05, 0.95, "Calculated Chromaticities\n(1nm Discretization)", fontsize=14, fontweight='bold', va='top')
+    # 【修改点 3】图表文本提示更新为 0.1nm
+    ax_text.text(0.05, 0.95, "Calculated Chromaticities\n(0.1nm Discretization)", fontsize=14, fontweight='bold', va='top')
     ax_text.text(0.05, 0.88, results_str, fontsize=11, va='top', family='monospace')
 
     plt.tight_layout()
